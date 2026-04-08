@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Light Toggle</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: transparent;
+      display: flex;
+      justify-content: center;
+    }
+
+    .card {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0;
+      padding: 8px;
+      background: #2d2d2d;
+      border: 1px solid #555;
+      border-radius: 16px;
+      cursor: pointer;
+      user-select: none;
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+
+    .card:active {
+      opacity: 0.7;
+    }
+
+    .bulb {
+      font-size: 32px;
+      transition: filter 0.3s;
+      flex-shrink: 0;
+    }
+
+    .bulb.off {
+      filter: grayscale(1) brightness(0.4);
+    }
+
+    .name {
+      color: #AAA;
+      font-size: 16px;
+      padding: 0px 8px;
+    }
+  </style>
+</head>
+<body>
+  <button class="card" id="card">
+    <div class="bulb off" id="bulb">💡</div>
+    <div class="name" id="light-name">Loading..</div>
+  </button>
+
+  <script>
+    (function() {
+      let nextId = 1;
+      let initialized = false;
+      let entityId = null;
+
+      function sendRequest(method, params) {
+        const id = nextId++;
+        window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
+        return id;
+      }
+
+      function sendNotification(method, params) {
+        window.parent.postMessage({ jsonrpc: "2.0", method, params }, "*");
+      }
+
+      let isOn = false;
+
+      function setState(stateText) {
+        isOn = stateText === "On";
+        document.getElementById("bulb").className = "bulb" + (isOn ? "" : " off");
+        document.getElementById("card").style.opacity = "1";
+      }
+
+      document.getElementById("card").addEventListener("click", () => {
+        const next = !isOn;
+        setState(next ? "On" : "Off");
+        sendRequest("tools/call", {
+          name: "light",
+          arguments: { name: entityId, is_on: next }
+        });
+      });
+
+      const resizeObserver = new ResizeObserver((entries) => {
+        for (let entry of entries) {
+          const { width, height } = entry.contentRect;
+          window.parent.postMessage({
+            jsonrpc: "2.0",
+            method: "ui/notifications/size-changed",
+            params: { width: Math.ceil(width), height: Math.ceil(height) }
+          }, "*");
+        }
+      });
+      resizeObserver.observe(document.documentElement);
+
+      window.addEventListener("message", function(event) {
+        const data = event.data;
+        if (!data || data.jsonrpc !== "2.0") return;
+
+        if (data.id === initId && data.result) {
+          initialized = true;
+          sendNotification("ui/notifications/initialized", {});
+          return;
+        }
+
+        if (data.method === "ui/notifications/tool-input") {
+          entityId = data.params?.arguments?.name ?? null;
+          const is_on = data.params?.arguments?.is_on ?? false;
+          document.getElementById("light-name").textContent = entityId ?? "ERROR";
+          setState(is_on ? "On" : "Off");
+          return;
+        }
+
+        if (data.method === "ui/resource-teardown") {
+          window.parent.postMessage({ jsonrpc: "2.0", id: data.id, result: {} }, "*");
+          return;
+        }
+      });
+
+      const initId = sendRequest("ui/initialize", {
+        protocolVersion: "2026-01-26",
+        appCapabilities: {
+          availableDisplayModes: ["inline", "pip", "fullscreen"]
+        },
+        appInfo: { name: "Light Toggle", version: "1.0.0" }
+      });
+    })();
+  </script>
+</body>
+</html>
