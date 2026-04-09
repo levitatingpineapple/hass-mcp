@@ -1,6 +1,7 @@
 mod api;
 use api::ws::*;
 use futures_util::{Sink, SinkExt, StreamExt};
+use light::Light;
 use parking_lot::RwLock;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -10,8 +11,8 @@ use rmcp::{
     tool, tool_router,
 };
 use schemars::{JsonSchema, Schema, SchemaGenerator};
-use serde::Deserialize;
-use serde_json::json;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, to_value};
 use std::{collections::HashMap, sync::OnceLock};
 use tokio_tungstenite::{
     connect_async,
@@ -49,24 +50,39 @@ pub(crate) fn lights() -> &'static RwLock<HashMap<Light, bool>> {
     LIGHTS.get().expect("lights not initialized")
 }
 
-/// A Home Assistant light entity, stored without the `light.` prefix.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Light {
-    pub name: String,
-}
+mod light {
 
-impl Light {
-    fn entity_id(&self) -> String {
-        format!("light.{}", self.name)
+    /// A Home Assistant light entity.
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    pub struct Light {
+        name: String,
     }
 
-    fn from_entity_id(id: &str) -> Result<Light, String> {
-        Ok(Light {
-            name: id
-                .strip_prefix("light.")
-                .ok_or_else(|| format!("entity id {id:?} is missing the 'light.' prefix"))?
-                .to_string(),
-        })
+    impl Light {
+        pub fn entity_id(&self) -> String {
+            format!("light.{}", self.name)
+        }
+
+        pub fn name(&self) -> String {
+            self.name.clone()
+        }
+
+        /// Creates light form WS
+        pub fn from_entity_id(id: &str) -> Result<Light, String> {
+            Ok(Light {
+                name: id
+                    .strip_prefix("light.")
+                    .ok_or_else(|| format!("entity id {id:?} is missing the 'light.' prefix"))?
+                    .to_string(),
+            })
+        }
+
+        /// Creates a light form MCP parameters
+        pub fn from_params(params: &super::LightParams) -> Light {
+            Light {
+                name: params.name.clone(),
+            }
+        }
     }
 }
 
@@ -186,27 +202,21 @@ impl Hass {
     )]
     async fn light(
         &self,
-        Parameters(LightParams { name, is_on }): Parameters<LightParams>,
+        Parameters(params): Parameters<LightParams>,
     ) -> Result<CallToolResult, McpError> {
-        if let Some(is_on) = is_on {
-            let state = if is_on { "on" } else { "off" };
-            if lights()
-                .read()
-                .get(&Light { name: name.clone() })
-                .expect("present")
-                == &is_on
-            {
-                return Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Light {name} was already {state}.",
-                ))]));
-            };
+        let was_on = lights()
+            .read()
+            .get(&Light::from_params(&params))
+            .cloned()
+            .expect("Shema only allows valid light names");
+        if let Some(is_on) = params.is_on {
             let url = format!(
                 "{}/services/light/{}",
                 self.uri.api(),
                 if is_on { "turn_on" } else { "turn_off" }
             );
             let client = reqwest::Client::new();
-            let light: Light = Light { name: name.clone() };
+            let light: Light = Light::from_params(&params);
             client
                 .post(&url)
                 .bearer_auth(&self.token)
@@ -216,23 +226,27 @@ impl Hass {
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?
                 .error_for_status()
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-            // Update local state instantly after a successful call
-            // as it can take time for ws state to "come back"
-            lights().write().insert(light, is_on);
-
-            Ok(CallToolResult::success(vec![Content::text(format!(
-                "Light {name} turned {state}.",
-            ))]))
-        } else {
-            let light = Light { name };
-            let map = lights().read();
-            let state = map
-                .get(&light)
-                .map(|&on| if on { "On" } else { "Off" })
-                .unwrap_or("Unknown");
-            Ok(CallToolResult::success(vec![Content::text(state)]))
-        }
+        };
+        let new_state = params.is_on.unwrap_or(was_on);
+        let mut result = CallToolResult::success(vec![Content::text(format!(
+            "The {} light {} {}.",
+            params.name,
+            match params.is_on {
+                Some(is_on) => {
+                    if was_on == is_on {
+                        "has been tunrned"
+                    } else {
+                        "was already"
+                    }
+                }
+                None => "is",
+            },
+            if new_state { "on" } else { "off" }
+        ))]);
+        result.structured_content =
+            Some(to_value(LightStructuredContent { is_on: new_state }).expect("Valid JSON"));
+        tracing::error!("{:?}", &result);
+        Ok(result)
     }
 }
 
@@ -297,13 +311,7 @@ impl ServerHandler for Hass {
         let uri = &request.uri;
         match uri.as_str() {
             HASS_URI => {
-                let html =
-                    std::fs::read_to_string("/root/hass-mcp/src/view.html").map_err(|e| {
-                        McpError::resource_not_found(
-                            "resource_not_found",
-                            Some(json!({ "error": e.to_string() })),
-                        )
-                    })?;
+                let html = include_str!("../view.html").to_string();
                 let contents = ResourceContents::text(html, uri.clone())
                     .with_mime_type(MCP_APP_MIME_TYPE)
                     .with_meta(Meta(rmcp::object!({
@@ -335,27 +343,27 @@ impl ServerHandler for Hass {
 
 fn restrict_to_light_ids(schema: &mut Schema) {
     let map = crate::hass::lights().read();
-    let names: Vec<_> = map.keys().map(|l| json!(l.name)).collect();
+    let mut names: Vec<String> = map.keys().map(|l| l.name().clone()).collect();
+    names.sort();
     schema.insert("enum".to_owned(), json!(names));
 }
 
 fn optional_bool_schema(_generator: &mut SchemaGenerator) -> Schema {
-    schemars::json_schema!({
-        "type": "boolean"
-    })
+    schemars::json_schema!({"type": "boolean"})
 }
-
-// #[derive(JsonSchema)]
-// pub struct MyStruct {
-//     #[schemars(schema_with = "optional_bool_schema")]
 
 #[derive(Deserialize, JsonSchema)]
 pub struct LightParams {
     #[schemars(transform = restrict_to_light_ids)]
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "optional_bool_schema")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_on: Option<bool>,
+}
+
+#[derive(Serialize)]
+pub struct LightStructuredContent {
+    is_on: bool,
 }
 
 #[cfg(test)]
@@ -365,36 +373,28 @@ mod tests {
     #[test]
     fn light_params_schema_enum() {
         LIGHTS.get_or_init(|| {
-            let mut map = HashMap::new();
-            map.insert(Light { name: "foo".into() }, false);
-            RwLock::new(map)
+            RwLock::new(HashMap::from([
+                (Light::from_entity_id("light.bar").unwrap(), false),
+                (Light::from_entity_id("light.foo").unwrap(), false),
+            ]))
         });
         let schema = schemars::schema_for!(LightParams);
-        let json = serde_json::to_string_pretty(&schema).unwrap();
+        let json: serde_json::Value = serde_json::to_value(&schema).unwrap();
         assert_eq!(
             json,
-            r#"{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "LightParams",
-  "type": "object",
-  "properties": {
-    "is_on": {
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
-    "name": {
-      "type": "string",
-      "enum": [
-        "foo"
-      ]
-    }
-  },
-  "required": [
-    "name"
-  ]
-}"#
+            serde_json::json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "title": "LightParams",
+                "type": "object",
+                "properties": {
+                    "is_on": { "type": "boolean" },
+                    "name": {
+                        "type": "string",
+                        "enum": ["bar", "foo"]
+                    }
+                },
+                "required": ["name"]
+            })
         );
     }
 }
