@@ -243,8 +243,13 @@ impl Hass {
             },
             if new_state { "on" } else { "off" }
         ))]);
-        result.structured_content =
-            Some(to_value(LightStructuredContent { is_on: new_state }).expect("Valid JSON"));
+        result.structured_content = Some(
+            to_value(LightStructuredContent {
+                name: params.name,
+                is_on: new_state,
+            })
+            .expect("Valid JSON"),
+        );
         tracing::error!("{:?}", &result);
         Ok(result)
     }
@@ -363,6 +368,7 @@ pub struct LightParams {
 
 #[derive(Serialize)]
 pub struct LightStructuredContent {
+    name: String,
     is_on: bool,
 }
 

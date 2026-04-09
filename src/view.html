@@ -56,10 +56,10 @@
 
   <script>
     (function() {
+      let isOn = false;
       let nextId = 1;
       let initialized = false;
-      let entityId = null;
-
+      
       function sendRequest(method, params) {
         const id = nextId++;
         window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
@@ -70,7 +70,6 @@
         window.parent.postMessage({ jsonrpc: "2.0", method, params }, "*");
       }
 
-      let isOn = false;
 
       function setState(stateText) {
         isOn = stateText === "On";
@@ -83,7 +82,7 @@
         setState(next ? "On" : "Off");
         sendRequest("tools/call", {
           name: "light",
-          arguments: { name: entityId, is_on: next }
+          arguments: { name: document.getElementById("light-name").textContent, is_on: next }
         });
       });
 
@@ -109,13 +108,13 @@
           return;
         }
 
-        if (data.method === "ui/notifications/tool-input") {
-          entityId = data.params?.arguments?.name ?? null;
-          const is_on = data.params?.arguments?.is_on ?? false;
-          document.getElementById("light-name").textContent = entityId ?? "ERROR";
-          setState(is_on ? "On" : "Off");
+        if (data.method === "ui/notifications/tool-result") {
+          const s = data.params.structuredContent;
+          document.getElementById("light-name").textContent = s.name;
+          setState(s.is_on ? "On" : "Off");
           return;
         }
+
 
         if (data.method === "ui/resource-teardown") {
           window.parent.postMessage({ jsonrpc: "2.0", id: data.id, result: {} }, "*");
