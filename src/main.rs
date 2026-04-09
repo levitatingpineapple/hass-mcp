@@ -1,22 +1,28 @@
 mod hass;
 use anyhow::Result;
+use axum::{Router, serve};
 use clap::{Parser, Subcommand};
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 use rmcp::{ServiceExt, transport::stdio};
+use tokio::net::TcpListener;
+use tokio::signal::ctrl_c;
+use tokio_util::sync::CancellationToken;
+use tower_http::cors::CorsLayer;
 use tracing::info;
 use tracing_subscriber::{self, EnvFilter};
+
+use crate::hass::Hass;
 
 #[derive(Parser)]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    Stdio,
     Http {
         #[arg(long, default_value = "127.0.0.1:8987")]
         bind: String,
@@ -25,51 +31,42 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let logger = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::DEBUG.into()));
+
     match Cli::parse().command {
-        Command::Stdio => {
-            tracing_subscriber::fmt()
-                .with_env_filter(
-                    EnvFilter::from_default_env().add_directive(tracing::Level::DEBUG.into()),
-                )
-                .with_writer(std::io::stderr)
-                .with_ansi(false)
-                .init();
+        None => {
+            logger.with_writer(std::io::stderr).with_ansi(false).init();
             info!("Starting MCP server over STDIO");
-            let service = hass::Hass::new()
+            let service = Hass::new()
                 .await
                 .serve(stdio())
                 .await
                 .inspect_err(|e| tracing::error!("serving error: {:?}", e))?;
             service.waiting().await?;
         }
-        Command::Http { bind } => {
-            tracing_subscriber::fmt()
-                .with_env_filter(
-                    EnvFilter::from_default_env().add_directive(tracing::Level::DEBUG.into()),
-                )
-                .init();
+        Some(Command::Http { bind }) => {
+            logger.init();
             info!("Starting MCP server over HTTP");
-            let ct = tokio_util::sync::CancellationToken::new();
+            let ct = CancellationToken::new();
+            let hass = Hass::new().await;
             let service = StreamableHttpService::new(
-                || {
-                    Ok(tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(hass::Hass::new())
-                    }))
-                },
+                move || Ok(hass.clone()),
                 LocalSessionManager::default().into(),
                 StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token()),
             );
-            let router = axum::Router::new().nest_service("/mcp", service);
-            let tcp_listener = tokio::net::TcpListener::bind(&bind).await?;
+            let router = Router::new()
+                .nest_service("/mcp", service)
+                .layer(CorsLayer::very_permissive());
+            let tcp_listener = TcpListener::bind(&bind).await?;
             info!("Listening on http://{bind}/mcp");
-            axum::serve(tcp_listener, router)
+            serve(tcp_listener, router)
                 .with_graceful_shutdown(async move {
-                    tokio::signal::ctrl_c().await.unwrap();
+                    ctrl_c().await.unwrap();
                     ct.cancel();
                 })
                 .await?;
         }
     }
-
     Ok(())
 }

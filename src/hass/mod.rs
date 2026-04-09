@@ -9,7 +9,7 @@ use rmcp::{
     service::RequestContext,
     tool, tool_router,
 };
-use schemars::{JsonSchema, Schema};
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::Deserialize;
 use serde_json::json;
 use std::{collections::HashMap, sync::OnceLock};
@@ -70,6 +70,7 @@ impl Light {
     }
 }
 
+#[derive(Clone)]
 pub struct Hass {
     uri: Host,
     token: String,
@@ -136,6 +137,7 @@ impl Hass {
                             .map(|l| (l, e.state == "on"))
                     })
                     .collect();
+                tracing::info!("Setting LIGHTS");
                 LIGHTS
                     .set(RwLock::new(map))
                     .expect("lights already initialized");
@@ -295,8 +297,8 @@ impl ServerHandler for Hass {
         let uri = &request.uri;
         match uri.as_str() {
             HASS_URI => {
-                let html = std::fs::read_to_string("/home/user/repo/local/mcp/src/view.html")
-                    .map_err(|e| {
+                let html =
+                    std::fs::read_to_string("/root/hass-mcp/src/view.html").map_err(|e| {
                         McpError::resource_not_found(
                             "resource_not_found",
                             Some(json!({ "error": e.to_string() })),
@@ -337,11 +339,22 @@ fn restrict_to_light_ids(schema: &mut Schema) {
     schema.insert("enum".to_owned(), json!(names));
 }
 
+fn optional_bool_schema(_generator: &mut SchemaGenerator) -> Schema {
+    schemars::json_schema!({
+        "type": "boolean"
+    })
+}
+
+// #[derive(JsonSchema)]
+// pub struct MyStruct {
+//     #[schemars(schema_with = "optional_bool_schema")]
+
 #[derive(Deserialize, JsonSchema)]
 pub struct LightParams {
     #[schemars(transform = restrict_to_light_ids)]
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_bool_schema")]
     pub is_on: Option<bool>,
 }
 
