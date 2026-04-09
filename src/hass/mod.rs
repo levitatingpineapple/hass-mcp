@@ -234,9 +234,9 @@ impl Hass {
             match params.is_on {
                 Some(is_on) => {
                     if was_on == is_on {
-                        "has been tunrned"
-                    } else {
                         "was already"
+                    } else {
+                        "has been tunrned"
                     }
                 }
                 None => "is",
