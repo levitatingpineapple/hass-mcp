@@ -1,7 +1,9 @@
 mod hass;
 use anyhow::Result;
+use axum::http::{HeaderName, HeaderValue};
 use axum::{Router, serve};
 use clap::{Parser, Subcommand};
+use reqwest::Method;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
@@ -55,9 +57,21 @@ async fn main() -> Result<()> {
                 LocalSessionManager::default().into(),
                 StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token()),
             );
-            let router = Router::new()
-                .nest_service("/mcp", service)
-                .layer(CorsLayer::very_permissive());
+            let cors = CorsLayer::new()
+                .allow_origin(
+                    "https://llama.quintadapinha.com"
+                        .parse::<HeaderValue>()
+                        .unwrap(),
+                )
+                .allow_methods([Method::POST])
+                .allow_headers([
+                    HeaderName::from_static("content-type"),
+                    HeaderName::from_static("mcp-protocol-version"),
+                    HeaderName::from_static("mcp-session-id"),
+                ])
+                .allow_credentials(true)
+                .expose_headers([HeaderName::from_static("mcp-session-id")]);
+            let router = Router::new().nest_service("/mcp", service).layer(cors);
             let tcp_listener = TcpListener::bind(&bind).await?;
             info!("Listening on http://{bind}/mcp");
             serve(tcp_listener, router)
